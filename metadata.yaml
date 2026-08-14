@@ -3,5 +3,5 @@ display_name: 每日新闻聚合播报
 desc: 手动或定时抓取并推送今日聚合新闻（标题+摘要+来源）
 help: 发送「/新闻」手动抓取并推送今日聚合新闻；配置定时播报可在每天固定时间自动推送到指定群
 version: 1.0.0
-author: Administrator
-repo: https://github.com/Administrator/astrbot_plugin_daily_news
+author: 云晓
+repo: https://github.com/yunxiao258/astrbot_plugin_daily_news

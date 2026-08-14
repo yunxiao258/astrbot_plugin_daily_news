@@ -17,7 +17,7 @@ from astrbot.api.star import Context, Star, register
 
 # 插件元数据
 PLUGIN_NAME = "astrbot_plugin_daily_news"
-PLUGIN_AUTHOR = "Administrator"
+PLUGIN_AUTHOR = "云晓"
 PLUGIN_DESC = "每日新闻聚合播报"
 PLUGIN_VERSION = "1.0.0"
 

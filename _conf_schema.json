@@ -1,0 +1,22 @@
+{
+  "news_push_enable": {
+    "description": "是否启用定时播报（后台每 30 秒检查一次，到 news_push_time 时向目标群推送今日聚合新闻）",
+    "type": "bool",
+    "default": false
+  },
+  "news_push_time": {
+    "description": "每日定时播报触发时间（24 小时制 HH:MM，如 08:00；非法值会回退默认 08:00）",
+    "type": "string",
+    "default": "08:00"
+  },
+  "news_push_groups": {
+    "description": "定时播报的目标群号，多个用英文逗号分隔，如 123456789,987654321；留空则不推送",
+    "type": "string",
+    "default": ""
+  },
+  "news_push_platform": {
+    "description": "定时播报使用的消息平台标识（对应 UMO 前缀，如 onebot）",
+    "type": "string",
+    "default": "onebot"
+  }
+}

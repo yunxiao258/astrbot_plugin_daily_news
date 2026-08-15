@@ -15,8 +15,8 @@
     "default": ""
   },
   "news_push_platform": {
-    "description": "定时播报使用的消息平台标识（对应 UMO 前缀，如 onebot）",
+    "description": "播报目标群所属平台实例 ID（如 云晓）。可留空：插件会自动学习目标群的平台（该群使用过 /新闻 后生效）",
     "type": "string",
-    "default": "onebot"
+    "default": ""
   }
 }

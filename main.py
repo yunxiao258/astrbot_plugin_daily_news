@@ -54,6 +54,8 @@ class DailyNewsPlugin(Star):
 
         # 去重记录：{日期(YYYY-MM-DD): [已推送群号, ...]}
         self._pushed: dict[str, list[str]] = {}
+        # 群号 -> 平台实例 ID 映射（从命令事件自动学习，用于定时推送定位平台）
+        self._group_platforms: dict[str, str] = {}
         self._load_pushed()
 
         # 定时任务状态
@@ -111,14 +113,32 @@ class DailyNewsPlugin(Star):
             return [str(x).strip() for x in v if str(x).strip()]
         return []
 
-    def _push_platform(self) -> str:
-        """读取消息平台标识（脏值防御）"""
-        v = str(self.config.get("news_push_platform", "onebot") or "onebot").strip()
-        return v or "onebot"
+    def _learn_platform(self, event) -> None:
+        """从消息事件学习「群号 -> 平台实例 ID」映射，供定时推送定位平台使用"""
+        try:
+            group_id = event.get_group_id()
+            if not group_id:
+                return
+            pid = event.get_platform_id()
+            if pid:
+                self._group_platforms[str(group_id)] = str(pid)
+        except Exception:
+            # 学习失败不影响指令本身
+            pass
+
+    def _resolve_platform(self, group_id: str) -> str:
+        """确定推送目标群所属平台 ID：配置优先，其次自动学习映射，再否则为空"""
+        v = str(self.config.get("news_push_platform", "") or "").strip()
+        if v:
+            return v
+        return self._group_platforms.get(str(group_id), "")
 
     def _target_umo(self, group_id: str) -> str:
-        """由群号构造推送目标 UMO（平台:GroupMessage:群号）"""
-        return f"{self._push_platform()}:GroupMessage:{group_id}"
+        """由群号构造推送目标 UMO（平台ID:GroupMessage:群号）；平台未知返回空串"""
+        platform = self._resolve_platform(group_id)
+        if not platform:
+            return ""
+        return f"{platform}:GroupMessage:{group_id}"
 
     # ========== 去重记录持久化 ==========
 
@@ -306,7 +326,14 @@ class DailyNewsPlugin(Star):
         for group in groups:
             if self._already_pushed(today, group):
                 continue
-            await self._send_text_to(self._target_umo(group), text)
+            umo = self._target_umo(group)
+            if not umo:
+                logger.warning(
+                    f"【{PLUGIN_NAME}】群 {group} 的平台 ID 未知"
+                    f"（可在 news_push_platform 中指定，或先在该群使用一次 /新闻），本次跳过推送"
+                )
+                continue
+            await self._send_text_to(umo, text)
             self._mark_pushed(today, group)
 
     # ========== 指令处理 ==========
@@ -315,6 +342,7 @@ class DailyNewsPlugin(Star):
     async def manual_news(self, event: AstrMessageEvent):
         """手动抓取并推送今日聚合新闻"""
         try:
+            self._learn_platform(event)
             sender = event.get_sender_id()
             logger.info(f"【{PLUGIN_NAME}】收到手动抓取请求，会话: {str(event.session)}, 发送者: {sender}")
             news = self._fetch_news()

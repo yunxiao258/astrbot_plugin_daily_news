@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
-"""AstrBot 每日新闻聚合播报插件：手动/定时抓取并推送今日聚合新闻（标题+摘要+来源）"""
+"""AstrBot 每日新闻聚合播报插件：手动/定时抓取并推送今日聚合新闻（标题+摘要+来源+发布时间）"""
 
 import asyncio
+import email.utils
 import json
 import os
 import re
+import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.all import MessageChain
@@ -33,8 +35,14 @@ NEWS_SOURCES = [
     {"name": "新浪新闻", "url": "https://rss.sina.com.cn/news/china/focus15.xml"},
 ]
 
+# Bing 搜索 RSS 输出（无需 API Key），作为关键词新闻源，优先于 RSS 抓取
+BING_RSS_URL = "https://cn.bing.com/search?format=rss&count={count}&q={query}"
+
 # 请求 UA，部分 RSS 源需要伪装浏览器
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+
+# 新闻时间统一按北京时间（UTC+8）显示与比较，避免依赖服务器时区导致偏差
+CN_TZ = timezone(timedelta(hours=8))
 
 
 @register(PLUGIN_NAME, PLUGIN_AUTHOR, PLUGIN_DESC, PLUGIN_VERSION)
@@ -184,27 +192,108 @@ class DailyNewsPlugin(Star):
 
     # ========== 新闻抓取 ==========
 
-    def _fetch_news(self, limit: int = DEFAULT_NEWS_LIMIT) -> list[dict]:
+    def _fetch_news(self, limit: int = DEFAULT_NEWS_LIMIT, bing_query: str | None = None) -> list[dict]:
         """抓取今日聚合新闻。
 
-        依次尝试各 RSS 源（优先国内可访问），解析为
-        [{"title": str, "summary": str, "source": str}, ...]。
+        bing_query 为 None 时使用配置 news_bing_query（空则跳过 Bing）。
+        依次尝试 Bing 搜索（若配置关键词）与各 RSS 源（优先国内可访问），解析为
+        [{"title", "summary", "source", "pub_time"}, ...]，
+        按发布时间倒序排列（无时间字段的排末尾），并按 news_max_age_hours 过滤旧新闻。
         单个源失败自动跳过，全部失败返回空列表（降级，不影响插件运行）。
         """
         limit = max(1, self._safe_int(limit, DEFAULT_NEWS_LIMIT))
+        if bing_query is None:
+            bing_query = str(self.config.get("news_bing_query", "") or "").strip()
         news: list[dict] = []
-        for src in NEWS_SOURCES:
+        sources: list[tuple[str, str]] = [(s["name"], s["url"]) for s in NEWS_SOURCES]
+        if bing_query:
+            # Bing 搜索优先（更贴合用户意图，自带时间排序）
+            sources.insert(0, ("__bing__", bing_query))
+        for src_name, src_url in sources:
             try:
-                items = self._fetch_rss(src["url"], src["name"])
+                if src_name == "__bing__":
+                    items = self._fetch_bing(bing_query, limit)
+                else:
+                    items = self._fetch_rss(src_url, src_name)
                 news.extend(items)
-                logger.info(f"【{PLUGIN_NAME}】抓取 {src['name']} 成功: {len(items)} 条")
+                logger.info(f"【{PLUGIN_NAME}】抓取 {src_name} 成功: {len(items)} 条")
                 if len(news) >= limit:
                     break
             except Exception as e:
                 # 单源失败仅告警，继续尝试下一源
-                logger.warning(f"【{PLUGIN_NAME}】抓取 {src['name']} 失败: {e}")
+                logger.warning(f"【{PLUGIN_NAME}】抓取 {src_name} 失败: {e}")
                 continue
+        # 发布时间倒序（无时间的排最末，key 用时间戳避免 aware/naive 混比）
+        news.sort(key=lambda it: (it.get("pub_time").timestamp() if it.get("pub_time") else 0), reverse=True)
+        news = self._filter_recent(news)
         return news[:limit]
+
+    def _fetch_bing(self, query: str, count: int = 10) -> list[dict]:
+        """通过 Bing 搜索 RSS 抓取与关键词相关的新闻条目。
+
+        Bing 支持无 API Key 的 RSS 输出（format=rss），复用 _fetch_rss 的标准解析。
+        """
+        url = BING_RSS_URL.format(
+            count=max(1, int(count)),
+            query=urllib.parse.quote(query),
+        )
+        return self._fetch_rss(url, "Bing搜索")
+
+    def _filter_recent(self, items: list[dict], now: datetime | None = None) -> list[dict]:
+        """按 news_max_age_hours 过滤旧新闻（0/负值=不过滤）。
+
+        无时间字段的条目不参与过滤（保留，排到末尾）。
+        严格过滤结果为空时逐级放宽（2 倍时长 → 全部保留），避免推送为空。
+        """
+        max_hours = self._safe_int(self.config.get("news_max_age_hours", 24), 24)
+        if max_hours <= 0:
+            return items
+        now = now or datetime.now(CN_TZ)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=CN_TZ)
+        # 分级放宽：先严格（max_hours），为空再放宽到 2 倍，仍为空则全部保留
+        for hours in (max_hours, max_hours * 2):
+            kept = [
+                it for it in items
+                if it.get("pub_time") is None
+                or (now - self._as_aware(it["pub_time"])).total_seconds() <= hours * 3600
+            ]
+            if kept:
+                return kept
+        return items
+
+    @staticmethod
+    def _as_aware(dt: datetime) -> datetime:
+        """naive 时间按北京时间标记，返回 aware"""
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=CN_TZ)
+        return dt
+
+    @staticmethod
+    def _parse_time(raw: str) -> datetime | None:
+        """解析 RSS/Atom 时间字段为北京时间 aware datetime。
+
+        兼容 RSS2 的 RFC822（pubDate，email.utils.parsedate_tz 全版本可用）
+        与 Atom 的 ISO8601（published/updated）。解析失败返回 None。
+        """
+        if not raw:
+            return None
+        s = raw.strip()
+        try:
+            t = email.utils.parsedate_tz(s)
+            if t:
+                # parsedate_tz 返回 10 元组，末位为 UTC 以东偏移秒数（+0800 → +28800）
+                utc_naive = datetime(*t[:6]) - timedelta(seconds=(t[9] or 0))
+                return utc_naive.replace(tzinfo=timezone.utc).astimezone(CN_TZ)
+        except (TypeError, ValueError, OverflowError):
+            pass
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(CN_TZ)
+        except ValueError:
+            return None
 
     def _fetch_rss(self, url: str, source: str) -> list[dict]:
         """抓取单个 RSS/Atom 源并解析出新闻条目（标准库 urllib + ElementTree）"""
@@ -228,7 +317,18 @@ class DailyNewsPlugin(Star):
             summary = re.sub(r"\s+", " ", summary).strip()
             if len(summary) > 120:
                 summary = summary[:120] + "…"
-            items.append({"title": title, "summary": summary, "source": source})
+            # 发布时间：RSS 用 pubDate，Atom 用 published/updated
+            pub_raw = (
+                self._node_text(node, "pubDate")
+                or self._node_text(node, "published")
+                or self._node_text(node, "updated")
+            )
+            items.append({
+                "title": title,
+                "summary": summary,
+                "source": source,
+                "pub_time": self._parse_time(pub_raw) if pub_raw else None,
+            })
         return items
 
     @staticmethod
@@ -246,8 +346,18 @@ class DailyNewsPlugin(Star):
 
     # ========== 文本格式化 ==========
 
+    def _time_tag(self, pub_time) -> str:
+        """发布时间标签（北京时间）：当天显示 [HH:MM]，跨天显示 [MM-DD HH:MM]，无时间返回空串"""
+        if not pub_time:
+            return ""
+        pub_time = self._as_aware(pub_time)
+        now = datetime.now(CN_TZ)
+        if pub_time.date() == now.date():
+            return f"[{pub_time.strftime('%H:%M')}] "
+        return f"[{pub_time.strftime('%m-%d')} {pub_time.strftime('%H:%M')}] "
+
     def _format_news(self, news: list[dict], date_str: str = "") -> str:
-        """把新闻列表格式化为推送文本（标题+摘要+来源），空列表返回空串"""
+        """把新闻列表格式化为推送文本（时间+标题+摘要+来源），空列表返回空串"""
         if not news:
             return ""
         date_str = date_str or self._now().strftime("%Y-%m-%d")
@@ -258,7 +368,8 @@ class DailyNewsPlugin(Star):
             source = (item.get("source") or "未知来源").strip()
             if not title:
                 continue
-            lines.append(f"{i}. {title}")
+            tag = self._time_tag(item.get("pub_time"))
+            lines.append(f"{i}. {tag}{title}" if tag else f"{i}. {title}")
             if summary:
                 lines.append(f"   {summary}")
             lines.append(f"   来源: {source}")
@@ -340,14 +451,20 @@ class DailyNewsPlugin(Star):
 
     @filter.command("新闻")
     async def manual_news(self, event: AstrMessageEvent):
-        """手动抓取并推送今日聚合新闻"""
+        """手动抓取并推送今日聚合新闻；/新闻 <关键词> 则按关键词 Bing 搜索"""
         try:
             self._learn_platform(event)
             sender = event.get_sender_id()
             logger.info(f"【{PLUGIN_NAME}】收到手动抓取请求，会话: {str(event.session)}, 发送者: {sender}")
-            news = self._fetch_news()
+            # 解析关键词：/新闻 xxx → Bing 搜索 xxx（兼容唤醒前缀剥离前后的格式）
+            raw = event.message_str or ""
+            m = re.match(r"^[\\/／]?\s*新闻\s*(.*)$", raw, re.S)
+            query = (m.group(1) or "").strip() if m else ""
+            news = self._fetch_news(bing_query=query or None)
             text = self._format_news(news)
             if not text:
+                if query:
+                    return self._send_text(event, f"❌ 未找到与「{query}」相关的新闻，请换关键词重试")
                 return self._send_text(event, "❌ 今日新闻抓取失败或为空，请稍后重试")
             return self._send_text(event, text)
         except Exception as e:

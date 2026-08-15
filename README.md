@@ -9,12 +9,16 @@ AstrBot 插件：手动或定时抓取并推送今日聚合新闻（标题+摘�
 ## 功能
 
 ### 手动抓取 (`/新闻`)
-发送 `/新闻` 立即抓取并推送今日聚合新闻（默认最多 5 条，含标题、摘要、来源）。
+发送 `/新闻` 立即抓取并推送今日聚合新闻（默认最多 5 条，含时间、标题、摘要、来源）；`/新闻 <关键词>` 则按关键词 Bing 搜索并展示结果（如 `/新闻 AI 新闻`）。
 
 ### 定时播报
 - 后台每 30 秒检查一次，到达配置时间 `news_push_time` 时向目标群自动推送今日聚合新闻
 - 同一天同一群只推送一次（去重记录持久化到 plugin_data），避免重复骚扰
 - 抓取失败返回空时本次跳过推送，不影响插件运行
+
+### 新闻时效
+- 自动解析 RSS/Atom 的发布时间（`pubDate`/`published`），每条新闻带时间标签（当天显示 `[HH:MM]`，跨天显示 `[MM-DD HH:MM]`），统一按北京时间显示
+- 按 `news_max_age_hours` 过滤旧新闻（默认 24 小时，0=不过滤）；严格过滤为空时自动放宽到 2 倍时长，仍为空则全部保留并标注时间，避免推送为空
 
 ## 依赖
 
@@ -29,9 +33,11 @@ AstrBot 插件：手动或定时抓取并推送今日聚合新闻（标题+摘�
 | `news_push_enable` | bool | `false` | 是否启用定时播报 |
 | `news_push_time` | string | `"08:00"` | 每日播报时间（HH:MM，非法值回退 08:00） |
 | `news_push_groups` | string | `""` | 目标群号，英文逗号分隔，留空则不推送 |
-| `news_push_platform` | string | `"onebot"` | 消息平台标识（UMO 前缀） |
+| `news_push_platform` | string | `""` | 平台实例 ID（留空自动学习，见上文推送平台说明） |
+| `news_max_age_hours` | int | `24` | 新闻最大时效（小时），0=不过滤 |
+| `news_bing_query` | string | `""` | 定时播报的 Bing 搜索关键词（建议用具体词，如「AI 科技」；泛词如「新闻」匹配质量差） |
 
-定时播报推送目标 UMO 由 `平台:GroupMessage:群号` 组成，例如 `onebot:GroupMessage:123456789`。
+定时播报推送目标 UMO 由 `平台ID:GroupMessage:群号` 组成（平台 ID 如 `云晓`，可通过群内 `/新闻` 自动学习，或手动在 `news_push_platform` 指定）。
 
 ## 新闻来源
 
@@ -42,6 +48,9 @@ AstrBot 插件：手动或定时抓取并推送今日聚合新闻（标题+摘�
 - 新浪新闻 RSS：`https://rss.sina.com.cn/news/china/focus15.xml`
 
 `_fetch_news()` 依次尝试各源（单源失败自动降级到下一源），兼容 RSS（`<item>`）与 Atom（`<entry>`），用标准库 `urllib.request` 抓取、`xml.etree.ElementTree` 解析。全部失败返回空列表，不影响插件运行。
+
+### Bing 搜索（无 API Key）
+配置 `news_bing_query`（或手动 `/新闻 <关键词>`）后，优先通过 `cn.bing.com/search?format=rss` 的 RSS 输出抓取与关键词相关的搜索结果（无需 Bing API Key），失败自动降级到 RSS 源。
 
 ## 数据
 

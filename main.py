@@ -477,7 +477,9 @@ class DailyNewsPlugin(Star):
             raw = event.message_str or ""
             m = re.match(r"^[\\/／]?\s*新闻\s*(.*)$", raw, re.S)
             query = (m.group(1) or "").strip() if m else ""
-            news = await asyncio.to_thread(self._fetch_news, bing_query or None)
+            news = await asyncio.to_thread(
+                self._fetch_news, DEFAULT_NEWS_LIMIT, query or None
+            )
             text = self._format_news(news)
             if not text:
                 if query:

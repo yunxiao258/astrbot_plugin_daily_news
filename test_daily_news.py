@@ -3,6 +3,7 @@
 
 使用内存替身构造实例，不联网、不写真实 plugin_data。
 """
+import asyncio
 import sys
 import unittest
 import urllib.parse
@@ -210,6 +211,47 @@ class TestBingSearch(unittest.TestCase):
         news = p._fetch_news()
         self.assertEqual(len(news), 3)
         self.assertEqual(news[0]["title"], "RSS兜底")
+
+
+class TestManualNews(unittest.TestCase):
+    """手动 /新闻 命令：关键词正确传给 _fetch_news，无 NameError 回归"""
+
+    def _plugin(self):
+        p = make_plugin()
+        captured = {}
+        p._fetch_news = lambda limit, bing_query=None: captured.update(
+            limit=limit, q=bing_query
+        ) or [{"title": "t", "url": "http://x", "date": "2026-08-17", "source": "s"}]
+        return p, captured
+
+    def test_keyword_passed_and_limit_default(self):
+        p, captured = self._plugin()
+
+        class R:
+            def __init__(self, c):
+                self.text = c
+
+        class E:
+            def __init__(self, msg):
+                self.message_str = msg
+                self.session = None
+
+            def get_sender_id(self):
+                return "1"
+
+            def chain_result(self, chain):
+                return R(chain[0].text)
+
+        async def run():
+            await p.manual_news(E("/新闻 人工智能"))
+            first = (captured["limit"], captured["q"])
+            await p.manual_news(E("/新闻"))
+            second = (captured["limit"], captured["q"])
+            return first, second
+
+        first, second = asyncio.run(run())
+        self.assertEqual(first, (5, "人工智能"))
+        self.assertEqual(second, (5, None))
 
 
 if __name__ == "__main__":

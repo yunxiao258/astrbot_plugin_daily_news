@@ -40,6 +40,8 @@ BING_RSS_URL = "https://cn.bing.com/search?format=rss&count={count}&q={query}"
 
 # 请求 UA，部分 RSS 源需要伪装浏览器
 _UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+# RSS 响应体大小上限（防止异常源导致内存膨胀）
+MAX_BODY_BYTES = 2 * 1024 * 1024
 
 # 新闻时间统一按北京时间（UTC+8）显示与比较，避免依赖服务器时区导致偏差
 CN_TZ = timezone(timedelta(hours=8))
@@ -296,10 +298,12 @@ class DailyNewsPlugin(Star):
             return None
 
     def _fetch_rss(self, url: str, source: str) -> list[dict]:
-        """抓取单个 RSS/Atom 源并解析出新闻条目（标准库 urllib + ElementTree）"""
+        """抓取单个 RSS/Atom 源并解析出新闻条目（标准库 urllib + ElementTree，应在线程中调用）"""
         req = urllib.request.Request(url, headers={"User-Agent": _UA})
         with urllib.request.urlopen(req, timeout=10) as resp:
-            raw = resp.read()
+            raw = resp.read(MAX_BODY_BYTES + 1)
+        if len(raw) > MAX_BODY_BYTES:
+            raise ValueError(f"响应体过大（>{MAX_BODY_BYTES} 字节）")
         root = ET.fromstring(raw)
         items = []
         # 兼容 RSS(<item>) 与 Atom(<entry>)
@@ -380,12 +384,14 @@ class DailyNewsPlugin(Star):
 
     # ========== 发送 ==========
 
-    async def _send_text_to(self, umo: str, text: str):
-        """向指定 UMO 会话推送纯文本（失败仅告警）"""
+    async def _send_text_to(self, umo: str, text: str) -> bool:
+        """向指定 UMO 会话推送纯文本；成功返回 True，失败告警并返回 False（调用方不记账）"""
         try:
             await self.context.send_message(umo, MessageChain([Plain(text)]))
+            return True
         except Exception as e:
             logger.warning(f"【{PLUGIN_NAME}】推送新闻到 {umo} 失败: {e}")
+            return False
 
     def _send_text(self, event: AstrMessageEvent, text: str):
         """构造命令回复的纯文本结果"""
@@ -393,15 +399,26 @@ class DailyNewsPlugin(Star):
 
     # ========== 定时播报 ==========
 
+    async def initialize(self) -> None:
+        """插件加载/重载时启动定时播报任务"""
+        await self._start_push_loop()
+
     @filter.on_astrbot_loaded()
     async def _start_push_loop(self):
-        """AstrBot 加载完成后启动定时播报任务（仅在启用且未运行时）"""
+        """启动定时播报任务（幂等：重复调用不会重复启动）"""
         if not self._push_enabled():
             return
         if self._running:
             return
         self._running = True
         self._task = asyncio.create_task(self._push_loop())
+        self._task.add_done_callback(
+            lambda t: (
+                logger.error(f"定时播报任务异常退出: {t.exception()}")
+                if not t.cancelled() and t.exception()
+                else None
+            )
+        )
         logger.info(f"【{PLUGIN_NAME}】定时播报已启动，每日 {self._push_time()} 推送")
 
     async def _push_loop(self):
@@ -428,8 +445,8 @@ class DailyNewsPlugin(Star):
         groups = self._push_groups()
         if not groups:
             return
-        # 抓取失败返回空则本次不推送（降级，不影响插件运行）
-        news = self._fetch_news()
+        # 抓取失败返回空则本次不推送（降级，不影响插件运行）；同步网络请求放入线程池避免阻塞事件循环
+        news = await asyncio.to_thread(self._fetch_news)
         text = self._format_news(news, today)
         if not text:
             logger.warning(f"【{PLUGIN_NAME}】{today} 新闻抓取为空，本次跳过推送")
@@ -444,8 +461,8 @@ class DailyNewsPlugin(Star):
                     f"（可在 news_push_platform 中指定，或先在该群使用一次 /新闻），本次跳过推送"
                 )
                 continue
-            await self._send_text_to(umo, text)
-            self._mark_pushed(today, group)
+            if await self._send_text_to(umo, text):
+                self._mark_pushed(today, group)
 
     # ========== 指令处理 ==========
 
@@ -460,7 +477,7 @@ class DailyNewsPlugin(Star):
             raw = event.message_str or ""
             m = re.match(r"^[\\/／]?\s*新闻\s*(.*)$", raw, re.S)
             query = (m.group(1) or "").strip() if m else ""
-            news = self._fetch_news(bing_query=query or None)
+            news = await asyncio.to_thread(self._fetch_news, bing_query or None)
             text = self._format_news(news)
             if not text:
                 if query:

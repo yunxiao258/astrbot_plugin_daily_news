@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
-"""AstrBot 每日新闻聚合播报插件：手动/定时抓取并推送今日聚合新闻（标题+摘要+来源+发布时间）"""
+"""AstrBot 每日新闻聚合播报插件：手动/定时抓取并推送今日聚合新闻
+
+v1.1.0 新增：分类订阅（科技/财经/体育等预置关键词组）、关键词过滤（黑/白名单）、
+历史回看（每日新闻快照存档，可按日期查询）。
+"""
 
 import asyncio
 import email.utils
@@ -20,13 +24,29 @@ from astrbot.api.star import Context, Star, register
 # 插件元数据
 PLUGIN_NAME = "astrbot_plugin_daily_news"
 PLUGIN_AUTHOR = "云晓"
-PLUGIN_DESC = "每日新闻聚合播报"
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_DESC = "每日新闻聚合播报（分类订阅/关键词过滤/历史回看）"
+PLUGIN_VERSION = "1.1.0"
 
 # 后台定时检查间隔（秒）
 PUSH_CHECK_INTERVAL = 30
 # 单次推送最大新闻条数
 DEFAULT_NEWS_LIMIT = 5
+
+# 预置新闻分类 -> 搜索关键词组（/新闻 <分类名> 直接按分类订阅）
+NEWS_CATEGORIES = {
+    "科技": "科技 新闻",
+    "互联网": "互联网 科技动态",
+    "财经": "财经 经济",
+    "股票": "股市 行情",
+    "体育": "体育 赛事",
+    "足球": "足球 比赛",
+    "娱乐": "娱乐 明星",
+    "游戏": "游戏 电竞",
+    "汽车": "汽车 新车",
+    "健康": "健康 养生",
+    "教育": "教育 考试",
+    "国际": "国际 时事",
+}
 
 # 新闻抓取源：优先国内可访问的免费 RSS，按顺序逐个尝试，全部失败则本次返回空（降级不影响运行）
 NEWS_SOURCES = [
@@ -150,6 +170,112 @@ class DailyNewsPlugin(Star):
             return ""
         return f"{platform}:GroupMessage:{group_id}"
 
+    # ========== 关键词过滤（v1.1.0） ==========
+
+    def _keyword_list(self, key: str) -> list[str]:
+        """解析逗号分隔的关键词配置为列表"""
+        v = self.config.get(key, "")
+        if isinstance(v, str):
+            return [x.strip() for x in v.split(",") if x.strip()]
+        if isinstance(v, (list, tuple)):
+            return [str(x).strip() for x in v if str(x).strip()]
+        return []
+
+    def _apply_keyword_filters(self, news: list[dict]) -> list[dict]:
+        """按配置过滤新闻：黑名单词命中剔除；白名单词设置时仅保留任一命中项。
+
+        过滤后为空且原列表非空时不强制清空（返回原列表），避免推送空白。
+        """
+        blocked = self._keyword_list("news_filter_keywords")
+        required = self._keyword_list("news_required_keywords")
+        if not blocked and not required:
+            return news
+
+        def hit_any(text: str, words: list[str]) -> bool:
+            return any(w in text for w in words)
+
+        kept = []
+        for it in news:
+            text = f"{it.get('title', '')} {it.get('summary', '')}"
+            if blocked and hit_any(text, blocked):
+                continue
+            if required and not hit_any(text, required):
+                continue
+            kept.append(it)
+        return kept if kept else news
+
+    # ========== 历史回看归档（v1.1.0） ==========
+
+    def _archive_file(self) -> str:
+        return os.path.join(self.data_dir, "news_archive.json")
+
+    def _archive_days(self) -> int:
+        """历史快照保留天数（1~90），脏值回退默认 7"""
+        v = self._safe_int(self.config.get("news_archive_days"), 7)
+        if v <= 0:
+            return 7
+        return min(90, v)
+
+    def _load_archive(self) -> dict:
+        """加载归档数据；损坏/结构异常时重置"""
+        try:
+            path = self._archive_file()
+            if not os.path.exists(path):
+                return {}
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict) and isinstance(raw.get("archives"), dict):
+                return raw
+            logger.warning("新闻归档格式异常，已重置")
+        except Exception as e:
+            logger.warning(f"加载新闻归档失败: {e}")
+        return {}
+
+    def _save_archive_snapshot(self, date_str: str, text: str, count: int):
+        """保存某日新闻快照并按保留天数清理过期记录"""
+        try:
+            raw = self._load_archive()
+            archives = raw.setdefault("archives", {})
+            archives[date_str] = {"text": text, "count": int(count)}
+            cutoff = (
+                datetime.now() - timedelta(days=self._archive_days())
+            ).strftime("%Y-%m-%d")
+            raw["archives"] = {d: v for d, v in sorted(archives.items()) if d >= cutoff}
+            tmp = self._archive_file() + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(raw, f, ensure_ascii=False)
+            os.replace(tmp, self._archive_file())
+        except Exception as e:
+            logger.warning(f"保存新闻归档失败: {e}")
+
+    def _lookup_archive(self, date_str: str = "") -> tuple[str, dict | None]:
+        """查询归档：date 为空取最近一天。返回 (日期, 快照或 None)"""
+        raw = self._load_archive()
+        archives = raw.get("archives") or {}
+        if not archives:
+            return date_str or "", None
+        target = date_str.strip() or max(archives.keys())
+        snap = archives.get(target)
+        if snap is None:
+            # 模糊匹配：允许输入 MM-DD，补全年份
+            m = re.match(r"^(\d{4})-(\d{2})-(\d{2})", target)
+            if not m:
+                year = datetime.now().strftime("%Y")
+                snap = archives.get(f"{year}-{target}")
+                target = f"{year}-{target}"
+        return target, snap
+
+    def _format_archive(self, date_str: str, snap: dict) -> str:
+        """格式化回看输出"""
+        count = snap.get("count", "?")
+        body = str(snap.get("text") or "")
+        lines = [
+            f"🗂️ 新闻回看（{date_str} · 当日 {count} 条）",
+            "━━━━━━━━━━━━━━━━━━━━━━",
+            body,
+        ]
+        return "\n".join(lines)
+
     # ========== 去重记录持久化 ==========
 
     def _pushed_file(self) -> str:
@@ -228,6 +354,7 @@ class DailyNewsPlugin(Star):
         # 发布时间倒序（无时间的排最末，key 用时间戳避免 aware/naive 混比）
         news.sort(key=lambda it: (it.get("pub_time").timestamp() if it.get("pub_time") else 0), reverse=True)
         news = self._filter_recent(news)
+        news = self._apply_keyword_filters(news)
         return news[:limit]
 
     def _fetch_bing(self, query: str, count: int = 10) -> list[dict]:
@@ -451,6 +578,8 @@ class DailyNewsPlugin(Star):
         if not text:
             logger.warning(f"【{PLUGIN_NAME}】{today} 新闻抓取为空，本次跳过推送")
             return
+        # 成功抓取后归档快照，供 /新闻 历史 回看
+        self._save_archive_snapshot(today, text, len(news))
         for group in groups:
             if self._already_pushed(today, group):
                 continue
@@ -468,27 +597,67 @@ class DailyNewsPlugin(Star):
 
     @filter.command("新闻")
     async def manual_news(self, event: AstrMessageEvent):
-        """手动抓取并推送今日聚合新闻；/新闻 <关键词> 则按关键词 Bing 搜索"""
+        """手动抓取并推送今日聚合新闻。
+
+        /新闻 <关键词> 按关键词 Bing 搜索；/新闻 <分类名> 分类订阅；
+        /新闻 分类 列出可用分类；/新闻 历史 [YYYY-MM-DD] 回看历史快照。
+        """
         try:
             self._learn_platform(event)
             sender = event.get_sender_id()
             logger.info(f"【{PLUGIN_NAME}】收到手动抓取请求，会话: {str(event.session)}, 发送者: {sender}")
-            # 解析关键词：/新闻 xxx → Bing 搜索 xxx（兼容唤醒前缀剥离前后的格式）
+            # 解析参数：兼容唤醒前缀剥离前后的格式
             raw = event.message_str or ""
             m = re.match(r"^[\\/／]?\s*新闻\s*(.*)$", raw, re.S)
             query = (m.group(1) or "").strip() if m else ""
+
+            # 历史回看：/新闻 历史 [日期] 或 /新闻 回看 [日期]
+            hm = re.match(r"^(?:历史|回看)(?:\s+(\S+))?$", query)
+            if hm:
+                return self._cmd_history(event, hm.group(1) or "")
+
+            # 分类列表：/新闻 分类
+            if query in ("分类", "分类列表", "类别"):
+                return self._cmd_categories(event)
+
+            # 分类订阅：query 是预置分类名时转换为搜索关键词
+            bing_query = NEWS_CATEGORIES.get(query, query or None)
+
             news = await asyncio.to_thread(
-                self._fetch_news, DEFAULT_NEWS_LIMIT, query or None
+                self._fetch_news, DEFAULT_NEWS_LIMIT, bing_query
             )
             text = self._format_news(news)
             if not text:
-                if query:
-                    return self._send_text(event, f"❌ 未找到与「{query}」相关的新闻，请换关键词重试")
+                if bing_query:
+                    return self._send_text(event, f"❌ 未找到与「{bing_query}」相关的新闻，请换关键词重试")
                 return self._send_text(event, "❌ 今日新闻抓取失败或为空，请稍后重试")
+            # 成功抓取后归档快照（关键词/分类搜索同样存档，供 /新闻 历史 回看）
+            self._save_archive_snapshot(
+                datetime.now().strftime("%Y-%m-%d"), text, len(news)
+            )
             return self._send_text(event, text)
         except Exception as e:
             logger.error(f"【{PLUGIN_NAME}】手动抓取新闻异常: {e}")
             return self._send_text(event, f"❌ 抓取新闻时出错: {str(e)}")
+
+    def _cmd_history(self, event: AstrMessageEvent, date_arg: str):
+        """/新闻 历史 [YYYY-MM-DD]：回看历史新闻快照（缺省回看最近一天）"""
+        target, snap = self._lookup_archive(date_arg)
+        if snap is None:
+            hint = f"❌ 没有 {target} 的新闻存档" if date_arg else "📭 暂无新闻存档"
+            return self._send_text(
+                event,
+                hint + "\n提示：成功抓取过的新闻会自动按日存档，之后即可用 /新闻 历史 [日期] 回看",
+            )
+        return self._send_text(event, self._format_archive(target, snap))
+
+    def _cmd_categories(self, event: AstrMessageEvent):
+        """/新闻 分类：列出预置分类"""
+        names = " | ".join(NEWS_CATEGORIES.keys())
+        return self._send_text(
+            event,
+            f"📂 可订阅的新闻分类（/新闻 <分类名>）\n━━━━━━━━━━━━━━━━━━━━━━\n{names}\n\n也可以直接输入任意关键词搜索，如 /新闻 人工智能",
+        )
 
     # ========== 生命周期 ==========
 

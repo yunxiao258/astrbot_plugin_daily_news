@@ -28,5 +28,20 @@
     "description": "定时播报的 Bing 搜索关键词（如「今日热点 科技」，留空则只抓 RSS 源）。搜索命中即优先展示 Bing 结果；也可随时用「/新闻 关键词」手动搜索",
     "type": "string",
     "default": ""
+  },
+  "news_filter_keywords": {
+    "description": "过滤关键词黑名单（英文逗号分隔）：标题或摘要命中任一词的新闻不推送/展示",
+    "type": "string",
+    "default": ""
+  },
+  "news_required_keywords": {
+    "description": "过滤关键词白名单（英文逗号分隔）：设置后仅保留标题或摘要命中任一词的新闻；过滤后为空时自动放弃过滤避免推送空白",
+    "type": "string",
+    "default": ""
+  },
+  "news_archive_days": {
+    "description": "历史快照保留天数（1~90，供 /新闻 历史 回看），非法值回退默认 7",
+    "type": "int",
+    "default": 7
   }
 }

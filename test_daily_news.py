@@ -4,12 +4,13 @@
 使用内存替身构造实例，不联网、不写真实 plugin_data。
 """
 import asyncio
+import os
 import sys
 import unittest
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 
-sys.path.insert(0, r"D:\astrbot\data\plugins")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from astrbot_plugin_daily_news.main import BING_RSS_URL, CN_TZ, DailyNewsPlugin  # noqa: E402
 

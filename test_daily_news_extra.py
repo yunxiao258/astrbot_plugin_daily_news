@@ -7,8 +7,9 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 
-sys.path.insert(0, r"D:\astrbot\data\plugins")
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from astrbot_plugin_daily_news.main import (  # noqa: E402
     NEWS_CATEGORIES,
@@ -105,51 +106,63 @@ class TestKeywordFilter(unittest.TestCase):
         self.assertEqual([n["title"] for n in kept], ["AI 大模型发布"])
 
     def test_applied_in_fetch_news(self):
-        # 过滤在 _fetch_news 流程内生效
+        # 过滤在 _fetch_news 流程内生效（mock 掉 RSS 源避免测试联网）
         p, _ = make_plugin({"news_filter_keywords": "股市"})
         p._fetch_bing = lambda q, c=10: sample_news() if q == "热点" else []
+        p._fetch_rss = lambda *a, **kw: []
         news = p._fetch_news(limit=10, bing_query="热点")
         self.assertFalse(any("股市" in n["title"] for n in news))
+
+
+def _days_ago(n: int) -> str:
+    return (datetime.now() - timedelta(days=n)).strftime("%Y-%m-%d")
 
 
 class TestArchive(unittest.TestCase):
     def test_save_and_lookup_latest(self):
         p, tmp = make_plugin()
-        p._save_archive_snapshot("2026-08-21", "21日新闻内容", 5)
-        p._save_archive_snapshot("2026-08-22", "22日新闻内容", 8)
+        d1, d2 = _days_ago(1), _days_ago(0)
+        p._save_archive_snapshot(d1, "昨日新闻内容", 5)
+        p._save_archive_snapshot(d2, "今日新闻内容", 8)
         date, snap = p._lookup_archive("")
-        self.assertEqual(date, "2026-08-22")
-        self.assertIn("22日新闻内容", snap["text"])
+        self.assertEqual(date, d2)
+        self.assertIn("今日新闻内容", snap["text"])
         self.assertEqual(snap["count"], 8)
 
     def test_lookup_by_date(self):
         p, _ = make_plugin()
-        p._save_archive_snapshot("2026-08-20", "20日内容", 3)
-        p._save_archive_snapshot("2026-08-22", "22日内容", 4)
-        date, snap = p._lookup_archive("2026-08-20")
-        self.assertIn("20日内容", snap["text"])
+        d1, d2 = _days_ago(2), _days_ago(0)
+        p._save_archive_snapshot(d1, "前日内容", 3)
+        p._save_archive_snapshot(d2, "今日内容", 4)
+        date, snap = p._lookup_archive(d1)
+        self.assertEqual(date, d1)
+        self.assertIn("前日内容", snap["text"])
 
     def test_lookup_missing_date(self):
         p, _ = make_plugin()
-        p._save_archive_snapshot("2026-08-22", "内容", 1)
+        p._save_archive_snapshot(_days_ago(0), "内容", 1)
         date, snap = p._lookup_archive("2020-01-01")
         self.assertIsNone(snap)
 
     def test_lookup_mmdd_fuzzy(self):
         p, _ = make_plugin()
-        p._save_archive_snapshot("2026-08-20", "模糊匹配内容", 2)
-        date, snap = p._lookup_archive("08-20")
+        d_target = _days_ago(2)
+        p._save_archive_snapshot(d_target, "模糊匹配内容", 2)
+        date, snap = p._lookup_archive(d_target[5:])
         self.assertIsNotNone(snap)
         self.assertIn("模糊匹配内容", snap["text"])
 
     def test_expired_cleaned_by_keep_days(self):
         p, _ = make_plugin({"news_archive_days": 7})
-        p._save_archive_snapshot("2026-07-01", "过期内容", 1)
-        p._save_archive_snapshot("2026-08-22", "新鲜内容", 2)
-        raw = json.load(open(os.path.join(p.data_dir, "news_archive.json"), encoding="utf-8"))
+        old_d = _days_ago(30)
+        fresh_d = _days_ago(0)
+        p._save_archive_snapshot(old_d, "过期内容", 1)
+        p._save_archive_snapshot(fresh_d, "新鲜内容", 2)
+        with open(os.path.join(p.data_dir, "news_archive.json"), encoding="utf-8") as f:
+            raw = json.load(f)
         archives = raw["archives"]
-        self.assertNotIn("2026-07-01", archives)
-        self.assertIn("2026-08-22", archives)
+        self.assertNotIn(old_d, archives)
+        self.assertIn(fresh_d, archives)
 
     def test_corrupted_archive_reset(self):
         p, tmp = make_plugin()
@@ -188,11 +201,12 @@ class TestCommandDispatch(unittest.TestCase):
 
     def test_history_by_date_command(self):
         p, _ = make_plugin()
-        p._save_archive_snapshot("2026-08-15", "十五号的内容", 4)
-        r = run(p.manual_news(FakeEvent("/新闻 历史 2026-08-15")))
+        target_d = _days_ago(1)
+        p._save_archive_snapshot(target_d, "昨日的内容", 4)
+        r = run(p.manual_news(FakeEvent(f"/新闻 历史 {target_d}")))
         text = chain_text(r)
-        self.assertIn("2026-08-15", text)
-        self.assertIn("十五号的内容", text)
+        self.assertIn(target_d, text)
+        self.assertIn("昨日的内容", text)
 
     def test_category_search_converts_query(self):
         p, _ = make_plugin()

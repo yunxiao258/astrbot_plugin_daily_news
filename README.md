@@ -105,6 +105,9 @@ D:\uv-tools\astrbot\Scripts\python.exe -m unittest discover -s . -p "test_*.py"
 
 ## 更新记录
 
+### v1.2.1
+- 修复 `hub_action("fetch_latest")` 在传入关键词时未走 `_fetch_news` 多源降级导致 RSS 解析异常未捕获的问题，并将返回条目中的 `pub_time` 序列化为 ISO 字符串以兼容 Web 面板 JSON 响应
+
 ### v1.2.0
 - 接入插件生态中枢标准联动协议（`hub_status` / `hub_action` 与定时推送事件上报，支持自动归档至群聊记忆摘要）
 

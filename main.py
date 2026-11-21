@@ -30,7 +30,7 @@ try:
 except ImportError:
     from hub_bridge import HUB_PROTOCOL_VERSION, emit_hub_event
 
-PLUGIN_VERSION = "1.2.0"
+PLUGIN_VERSION = "1.2.1"
 
 # 后台定时检查间隔（秒）
 PUSH_CHECK_INTERVAL = 30
@@ -694,8 +694,15 @@ class DailyNewsPlugin(Star):
         p = params or {}
         if action == "fetch_latest":
             kw = str(p.get("keyword", "") or "").strip()
-            items = await asyncio.to_thread(self._fetch_bing, kw) if kw else await asyncio.to_thread(self._fetch_news)
-            return {"ok": True, "data": {"count": len(items), "items": items[:10]}}
+            try:
+                raw_items = await asyncio.to_thread(self._fetch_news, DEFAULT_NEWS_LIMIT, kw or None)
+            except Exception as exc:
+                return {"ok": False, "error": f"抓取新闻失败：{exc}"}
+            items = [
+                {k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in it.items()}
+                for it in (raw_items or [])[:10]
+            ]
+            return {"ok": True, "data": {"count": len(items), "items": items}}
         if action == "get_archive":
             arch = self._load_archive()
             return {"ok": True, "data": {"dates": sorted(arch.keys())[-10:]}}

@@ -25,7 +25,12 @@ from astrbot.api.star import Context, Star, register
 PLUGIN_NAME = "astrbot_plugin_daily_news"
 PLUGIN_AUTHOR = "云晓"
 PLUGIN_DESC = "每日新闻聚合播报（分类订阅/关键词过滤/历史回看）"
-PLUGIN_VERSION = "1.1.1"
+try:
+    from .hub_bridge import HUB_PROTOCOL_VERSION, emit_hub_event
+except ImportError:
+    from hub_bridge import HUB_PROTOCOL_VERSION, emit_hub_event
+
+PLUGIN_VERSION = "1.2.0"
 
 # 后台定时检查间隔（秒）
 PUSH_CHECK_INTERVAL = 30
@@ -69,6 +74,7 @@ CN_TZ = timezone(timedelta(hours=8))
 
 @register(PLUGIN_NAME, PLUGIN_AUTHOR, PLUGIN_DESC, PLUGIN_VERSION)
 class DailyNewsPlugin(Star):
+    HUB_PROTOCOL_VERSION = HUB_PROTOCOL_VERSION
     """每日新闻聚合播报：/新闻 手动推送；定时向目标群自动推送"""
 
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -595,6 +601,7 @@ class DailyNewsPlugin(Star):
                 continue
             if await self._send_text_to(umo, text):
                 self._mark_pushed(today, group)
+                emit_hub_event(PLUGIN_NAME, "daily_news.pushed", {"umo": umo, "group_id": group, "date": today, "count": len(news), "summary": text[:280]}, self.context)
 
     # ========== 指令处理 ==========
 
@@ -674,3 +681,22 @@ class DailyNewsPlugin(Star):
             except asyncio.CancelledError:
                 pass
             self._task = None
+
+    def hub_status(self) -> dict:
+        return {
+            "version": PLUGIN_VERSION,
+            "status": "online",
+            "metrics": {"定时播报": "开" if self._push_enabled() else "关", "目标群": len(self._push_groups()), "播报时间": self._push_time()},
+            "actions": ["fetch_latest", "get_archive"],
+        }
+
+    async def hub_action(self, action: str, params: dict | None = None) -> dict:
+        p = params or {}
+        if action == "fetch_latest":
+            kw = str(p.get("keyword", "") or "").strip()
+            items = await asyncio.to_thread(self._fetch_bing, kw) if kw else await asyncio.to_thread(self._fetch_news)
+            return {"ok": True, "data": {"count": len(items), "items": items[:10]}}
+        if action == "get_archive":
+            arch = self._load_archive()
+            return {"ok": True, "data": {"dates": sorted(arch.keys())[-10:]}}
+        return {"ok": False, "error": f"不支持的动作：{action}"}

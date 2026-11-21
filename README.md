@@ -105,6 +105,9 @@ D:\uv-tools\astrbot\Scripts\python.exe -m unittest discover -s . -p "test_*.py"
 
 ## 更新记录
 
+### v1.2.0
+- 接入插件生态中枢标准联动协议（`hub_status` / `hub_action` 与定时推送事件上报，支持自动归档至群聊记忆摘要）
+
 ### v1.1.0
 - 新增**分类订阅**：`/新闻 <分类名>` 按预置 12 类关键词搜索，`/新闻 分类` 列出全部分类
 - 新增**关键词过滤**：`news_filter_keywords` 黑名单剔除 + `news_required_keywords` 白名单保留，全过滤时自动放弃避免空白
